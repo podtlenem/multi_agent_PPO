@@ -1,0 +1,4 @@
+torch==2.9.1+cu130
+petting_zoo==1.25.0
+matplotlib==3.10.8
+pyyaml==6.0.3
