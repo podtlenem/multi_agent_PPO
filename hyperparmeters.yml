@@ -1,0 +1,10 @@
+deafult:
+  lr: 0.0005
+  save_freq: 10
+  n_updates_per_iteration: 4
+  clip: 0.2
+  render: False
+  gamma: 0.95
+  seed: None
+  exploration: 0.2
+  parameters_max_change: 2.5
