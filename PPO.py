@@ -29,6 +29,12 @@ class PPO:
         """
         self._init_hyperparameters(hyperparameters)
         self.id = instance_id
+        self.device = torch.device(
+            #"xpu" if torch.xpu.is_available() else you can use if else but i must turn of
+            #"cuda" if torch.cuda.is_available()
+            #else
+            "cpu"
+        )
 
         self.PLOT_PATH = f"results/{instance_id}/ppo_learning_graph"
         self.SAVE_PATH = f"results/{instance_id}"
@@ -56,10 +62,14 @@ class PPO:
 
         self.i_so_far = 0
 
-        self.actor =  policy_class(self.obs_dim, self.act_dim)
-        self.critic = policy_class(self.obs_dim, 1)
+        self.actor =  policy_class(self.obs_dim, self.act_dim, device = self.device).to(self.device)
+        self.critic = policy_class(self.obs_dim, 1, device = self.device).to(self.device)
+
         self.actor_optim:torch.optim.optimizer.Optimizer =  Adam(self.actor.parameters(), lr=self.lr)
         self.critic_optim:torch.optim.optimizer.Optimizer = Adam(self.critic.parameters(), lr=self.lr)
+
+        self.actor.compile(mode="reduce-overhead")
+        self.critic.compile(mode = "reduce-overhead")
 
         if self.continues_env:
             self.cov_var = torch.full(size=(self.act_dim,), fill_value=0.5)
@@ -98,7 +108,7 @@ class PPO:
         actualize policy in masked env
         """
         self.to_tensors()
-        batch_masks = torch.tensor(data=np.array(self.batch_masks), dtype=torch.bool)
+        batch_masks = torch.from_numpy(np.array(self.batch_masks)).to(dtype=torch.bool,device=self.device)
 
         v, _, _ = self.evaluate_masked(self.batch_obs, self.batch_acts, batch_masks)
 
@@ -119,9 +129,9 @@ class PPO:
         """
         make every data for learning tensor
         """
-        self.batch_obs = torch.tensor(np.stack(self.batch_obs), dtype=torch.float32)
-        self.batch_log_probs = torch.tensor(np.stack(self.batch_log_probs), dtype=torch.int32)
-        self.batch_acts = torch.tensor(np.array(self.batch_acts), dtype=torch.long)
+        self.batch_obs = torch.from_numpy(np.stack(self.batch_obs)).to(dtype=torch.float32, device=self.device)
+        self.batch_log_probs = torch.tensor(np.stack(self.batch_log_probs)).to(dtype=torch.float32,device=self.device)
+        self.batch_acts = torch.tensor(np.array(self.batch_acts),dtype=torch.long, device=self.device)
         self.batch_rtgs = self.compute_rtgs(self.batch_rews)
 
     def fit(self,ent,v,curr_log_prob,a_k):
@@ -143,12 +153,12 @@ class PPO:
         critic_loss = nn.MSELoss()(v.squeeze(), self.batch_rtgs.squeeze())
 
         self.actor_optim.zero_grad()
-        actor_loss.backward(retain_graph=True)
+        actor_loss.backward(create_graph=False,retain_graph=False)
         nn.utils.clip_grad_norm_(self.actor.parameters(), self.parameters_max_change)
         self.actor_optim.step()
 
         self.critic_optim.zero_grad()
-        critic_loss.backward(retain_graph=True)
+        critic_loss.backward(create_graph=False,retain_graph=False)
         nn.utils.clip_grad_norm_(self.critic.parameters(), self.parameters_max_change)
         self.critic_optim.step()
 
@@ -193,11 +203,11 @@ class PPO:
         if not done:
             self.batch_obs.append(obs.flatten())
 
-            action, log_prob = self.get_action(obs.flatten())
+            action, log_prob = self.get_action(torch.from_numpy(obs.flatten()).to(device=self.device,dtype=torch.float32))
 
             self.ep_rews.append(rew)
             self.batch_acts.append(action)
-            self.batch_log_probs.append(log_prob)
+            self.batch_log_probs.append(log_prob.cpu())
             env.step(action)
         else:
             env.step(None)
@@ -219,11 +229,11 @@ class PPO:
         if not done:
             self.batch_obs.append(obs['observation'])
 
-            action, log_prob = self.get_action_masked(obs['observation'],obs['action_mask'])
+            action, log_prob = self.get_action_masked(torch.from_numpy(obs['observation']).to(device=self.device,dtype=torch.float32),obs['action_mask'])
 
             self.ep_rews.append(rew)
             self.batch_acts.append(action)
-            self.batch_log_probs.append(log_prob)
+            self.batch_log_probs.append(log_prob.cpu())
             env.step(action)
         else:
             env.step(None)
@@ -280,7 +290,7 @@ class PPO:
             for rew in reversed(ep_rews):
                 discount_factor = rew + self.gamma * discount_factor
                 batch_rtgs.insert(0, discount_factor)
-        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float)
+        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float,device=self.device)
         return batch_rtgs
 
     def get_action(self, obs) -> Tuple[np.ndarray, torch.Tensor]:
@@ -296,7 +306,7 @@ class PPO:
             dist = MultivariateNormal(mean, self.cov_mat)
         action = dist.sample()
         log_prob = dist.log_prob(action)
-        return action.detach().numpy(), log_prob.detach()
+        return action.detach().cpu().numpy(), log_prob.detach()
 
     def get_action_masked(self, obs, mask) -> Tuple[np.ndarray, torch.Tensor]:
         """
@@ -307,15 +317,15 @@ class PPO:
         """
         mean = self.actor(obs)
         if not self.continues_env:
-            mask = torch.tensor(mask,dtype=torch.bool)
+            mask = torch.tensor(mask,dtype=torch.bool,device=self.device)
             mask_mean = mean.masked_fill(~mask,-1e8)
-            self.batch_masks.append(mask.numpy())
+            self.batch_masks.append(mask.cpu().numpy())
             dist = Categorical(logits= mask_mean)
         else:
             dist = MultivariateNormal(mean, self.cov_mat)
         action = dist.sample()
         log_prob = dist.log_prob(action)
-        return action.detach().numpy(), log_prob.detach()
+        return action.detach().cpu().numpy(), log_prob.detach()
 
     def evaluate(self, batch_obs, batch_acts) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -339,6 +349,7 @@ class PPO:
         evalute policy and critic  in env with masks
         :param batch_obs: batch with obs from games
         :param batch_acts: batch with acts from games
+        :param batch_masks: batch with masks from games
         :return: value , curr_log_prob, entropy of policy
         """
         v = self.critic(batch_obs).squeeze()
@@ -376,7 +387,7 @@ class PPO:
         delta_t = (self.logger['delta_t'] - delta_t) / 1e9
         delta_t = str(round(delta_t, 2))
         avg_ep_rews = np.mean([np.sum(ep_reward) for ep_reward in self.batch_rews])
-        avg_actor_loss = np.mean([losses.float().mean() for losses in self.logger['actor_losses']])
+        avg_actor_loss = np.mean([losses.cpu().float().mean() for losses in self.logger['actor_losses']])
         self.avg_rew_hist = np.append(self.avg_rew_hist, avg_ep_rews)
         self.avg_actor_losses_hist = np.append(self.avg_actor_losses_hist, -avg_actor_loss)
 
